@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -14,6 +16,15 @@ import (
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 )
+
+type SystemStats struct {
+	CPUUsage    float64 `json:"cpu_usage"`
+	MemoryUsage float64 `jason:"memory_usage"`
+	DiskUsage   float64 `jason:"disk_usage"`
+}
+
+var currentStats SystemStats
+var statsMutex sync.RWMutex
 
 const (
 	defaultInterval    = 5 * time.Second
@@ -43,6 +54,9 @@ func logData(file *os.File, interval time.Duration, wg *sync.WaitGroup, stop <-c
 				logLine := fmt.Sprintf("CPU Usage: %v%%\n", cpuPercents[0])
 				writer.WriteString(logLine)
 				fmt.Print(logLine)
+				statsMutex.Lock()
+				currentStats.CPUUsage = cpuPercents[0]
+				statsMutex.Unlock()
 			}
 
 			// Memory Usage
@@ -55,6 +69,9 @@ func logData(file *os.File, interval time.Duration, wg *sync.WaitGroup, stop <-c
 				logLine := fmt.Sprintf("Memory Usage: %v%%\n", vmStat.UsedPercent)
 				writer.WriteString(logLine)
 				fmt.Print(logLine)
+				statsMutex.Lock()
+				currentStats.MemoryUsage = vmStat.UsedPercent
+				statsMutex.Unlock()
 			}
 
 			// Disk Usage
@@ -67,24 +84,32 @@ func logData(file *os.File, interval time.Duration, wg *sync.WaitGroup, stop <-c
 				logLine := fmt.Sprintf("Disk Usage: %v%%\n", diskStat.UsedPercent)
 				writer.WriteString(logLine)
 				fmt.Print(logLine)
+				statsMutex.Lock()
+				currentStats.DiskUsage = diskStat.UsedPercent
+				statsMutex.Unlock()
 			}
 
 			writer.Flush()
 		}
 	}
 }
+func statsHandler(w http.ResponseWriter, r *http.Request) {
+	statsMutex.RLock()
+	defer statsMutex.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(currentStats)
+}
 
 func main() {
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 
-	// Get log file name from environment variable or use default
+	// Open log file
 	logFileName := os.Getenv("LOG_FILE_NAME")
 	if logFileName == "" {
-		logFileName = defaultLogFileName
+		logFileName = "hardware_log.txt"
 	}
-
-	// Open log file
 	logFile, err := os.Create(logFileName)
 	if err != nil {
 		fmt.Printf("Error creating log file: %v\n", err)
@@ -133,6 +158,18 @@ func main() {
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 		<-sigs
 		close(stop)
+	}()
+
+	// Start HTTP server
+	http.HandleFunc("/stats", statsHandler)
+	server := &http.Server{Addr: ":8080"}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("Error starting server: %v\n", err)
+		}
 	}()
 
 	wg.Wait()
