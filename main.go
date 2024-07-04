@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -14,20 +15,30 @@ import (
 	"github.com/shirou/gopsutil/mem"
 )
 
-func logData(file *os.File, wg *sync.WaitGroup, stop <-chan struct{}) {
+const (
+	defaultInterval    = 5 * time.Second
+	defaultLogFileName = "hardware_log.txt"
+)
+
+func logData(file *os.File, interval time.Duration, wg *sync.WaitGroup, stop <-chan struct{}) {
 	defer wg.Done()
 	writer := bufio.NewWriter(file)
 	defer writer.Flush()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-stop:
 			return
-		default:
+		case <-ticker.C:
 			// CPU Usage
 			cpuPercents, err := cpu.Percent(0, false)
 			if err != nil {
-				fmt.Printf("Error getting CPU percent: %v\n", err)
+				logLine := fmt.Sprintf("Error getting CPU percent: %v\n", err)
+				writer.WriteString(logLine)
+				fmt.Print(logLine)
 			} else {
 				logLine := fmt.Sprintf("CPU Usage: %v%%\n", cpuPercents[0])
 				writer.WriteString(logLine)
@@ -37,7 +48,9 @@ func logData(file *os.File, wg *sync.WaitGroup, stop <-chan struct{}) {
 			// Memory Usage
 			vmStat, err := mem.VirtualMemory()
 			if err != nil {
-				fmt.Printf("Error getting memory info: %v\n", err)
+				logLine := fmt.Sprintf("Error getting memory info: %v\n", err)
+				writer.WriteString(logLine)
+				fmt.Print(logLine)
 			} else {
 				logLine := fmt.Sprintf("Memory Usage: %v%%\n", vmStat.UsedPercent)
 				writer.WriteString(logLine)
@@ -47,7 +60,9 @@ func logData(file *os.File, wg *sync.WaitGroup, stop <-chan struct{}) {
 			// Disk Usage
 			diskStat, err := disk.Usage("/")
 			if err != nil {
-				fmt.Printf("Error getting disk usage: %v\n", err)
+				logLine := fmt.Sprintf("Error getting disk usage: %v\n", err)
+				writer.WriteString(logLine)
+				fmt.Print(logLine)
 			} else {
 				logLine := fmt.Sprintf("Disk Usage: %v%%\n", diskStat.UsedPercent)
 				writer.WriteString(logLine)
@@ -55,7 +70,6 @@ func logData(file *os.File, wg *sync.WaitGroup, stop <-chan struct{}) {
 			}
 
 			writer.Flush()
-			time.Sleep(5 * time.Second)
 		}
 	}
 }
@@ -64,17 +78,34 @@ func main() {
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 
+	// Get log file name from environment variable or use default
+	logFileName := os.Getenv("LOG_FILE_NAME")
+	if logFileName == "" {
+		logFileName = defaultLogFileName
+	}
+
 	// Open log file
-	logFile, err := os.Create("hardware_log.txt")
+	logFile, err := os.Create(logFileName)
 	if err != nil {
 		fmt.Printf("Error creating log file: %v\n", err)
 		return
 	}
 	defer logFile.Close()
 
+	// Get log interval from environment variable or use default
+	intervalStr := os.Getenv("LOG_INTERVAL")
+	interval := defaultInterval
+	if intervalStr != "" {
+		if i, err := strconv.Atoi(intervalStr); err == nil {
+			interval = time.Duration(i) * time.Second
+		} else {
+			fmt.Printf("Invalid LOG_INTERVAL, using default: %v\n", defaultInterval)
+		}
+	}
+
 	// Goroutine for monitoring and logging system stats
 	wg.Add(1)
-	go logData(logFile, &wg, stop)
+	go logData(logFile, interval, &wg, stop)
 
 	// Goroutine for capturing user input
 	wg.Add(1)
